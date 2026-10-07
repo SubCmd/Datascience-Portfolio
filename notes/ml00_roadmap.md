@@ -265,3 +265,46 @@ docker load < mle-train.tar.gz                         # 폐쇄망 서버에서
 ```
  
 ---
+
+## 6. GPU 소프트웨어 스택과 메모리 추정
+ 
+### 6.1 계층 구조
+ 
+```
+PyTorch (torch 패키지 안에 CUDA runtime, cuDNN이 번들됨)
+   ↑
+CUDA Runtime / cuDNN / cuBLAS  ← 연산 라이브러리
+   ↑
+NVIDIA 드라이버                ← 호스트에 설치, 지원 가능한 최대 CUDA 버전을 결정
+   ↑
+GPU 하드웨어
+```
+ 
+**핵심 규칙**: 드라이버는 **하위 호환**됨. 최신 드라이버는 그보다 낮은 CUDA 버전으로 빌드된 PyTorch를 돌릴 수 있지만, 오래된 드라이버는 새 CUDA로 빌드된 PyTorch를 못 돌림. `nvidia-smi` 우측 상단의 "CUDA Version"은 **드라이버가 지원하는 최대 버전**이지, 설치된 버전이 아님.
+ 
+```python
+import torch
+print(torch.__version__)            # 예: 2.x.x+cu124
+print(torch.version.cuda)           # PyTorch가 빌드된 CUDA 버전
+print(torch.cuda.is_available())    # GPU 사용 가능 여부
+print(torch.cuda.get_device_name(0))
+```
+
+
+### 6.2 VRAM 추정: 면접 단골 계산
+ 
+파라미터 수를 $N$ 이라 할 때 자료형별 바이트 수는 fp32 = 4, fp16/bf16 = 2, int8 = 1, int4 = 0.5 임
+ 
+**추론(가중치만)**
+ 
+$$\text{메모리} \approx N \times \text{bytes per param}$$
+ 
+예: 7B 모델을 bf16으로 로드하면 $7\times10^9 \times 2 = 14\text{GB}$ (+ 활성값, KV cache 여유분).
+ 
+**학습 (AdamW, fp32)**: 파라미터당 가중치 4 + 그래디언트 4 + Adam 1차 모멘트 4 + 2차 모멘트 4 = **16 bytes**
+ 
+**학습 (Mixed precision + AdamW)**: fp16 가중치 2 + fp16 그래디언트 2 + fp32 마스터 가중치 4 + 모멘트 8 = 역시 **약 16 bytes**. 혼합정밀도의 이득은 주로 **연산 속도와 활성값 메모리**에서 나옴.
+ 
+여기에 **활성값(activation)** 메모리가 배치 크기와 시퀀스 길이에 비례해 추가됨. 이것을 줄이는 기법(gradient checkpointing, ZeRO, FSDP)은 MLE13, MLE33에서 다룸.
+ 
+---
